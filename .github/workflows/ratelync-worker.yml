@@ -1,4 +1,4 @@
-name: RateLync CA to GH Worker
+name: RateLync UK to NG Worker
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ratelync-ca-gh-worker
+  group: ratelync-uk-ng-worker
   cancel-in-progress: false
 
 jobs:
