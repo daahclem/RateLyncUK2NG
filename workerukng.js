@@ -334,43 +334,49 @@ async function handleTapTap(page, source) {
 }
 
 async function handleTransferGo(page, source) {
-  await page.goto("https://www.transfergo.com/gb/send-money-to-nigeria", {
+  await page.goto("https://www.transfergo.com/gb/currency-converter", {
     waitUntil: "domcontentloaded",
     timeout: 60000,
   });
 
   await page.waitForTimeout(5000);
 
-  await page
-    .getByRole("button", { name: /Accept all/i })
+  await page.getByRole("button", { name: /Accept all/i })
     .click({ timeout: 10000 })
     .catch(() => {});
 
+  // Sending currency = GBP
+  await page.getByRole("button", { name: /GB GBP|Sending currency/i })
+    .click({ timeout: 15000, force: true });
+
+  const sendSearch = page.getByRole("textbox", { name: /Search/i }).first();
+  await sendSearch.waitFor({ timeout: 15000 });
+  await sendSearch.fill("gbp");
+
+  const gbpOption = page.getByRole("option", {
+    name: /GB GBP Pound Sterling|GBP/i,
+  }).first();
+
+  await gbpOption.waitFor({ timeout: 15000 });
+  await gbpOption.click({ timeout: 15000, force: true });
+
   await page.waitForTimeout(1500);
 
-  await page
-    .getByRole("button", { name: "Sending currency button." })
-    .click({ force: true });
+  // Receiving currency = NGN
+  await page.getByRole("button", { name: /NG NGN|Receiving currency|GH GHS/i })
+    .click({ timeout: 15000, force: true });
 
-  await page.waitForTimeout(1000);
+  const receiveSearch = page.getByRole("textbox", { name: /Search/i }).last();
+  await receiveSearch.waitFor({ timeout: 15000 });
+  await receiveSearch.fill("ngn");
 
-  await page
-    .getByRole("option", { name: /Popular sending option:\s*GBP/i })
-    .first()
-    .click({ timeout: 10000 });
+  const ngnOption = page.getByRole("option", {
+    name: /NG NGN Nigerian Naira|NG NGN|Naira/i,
+  }).first();
 
-  await page.waitForTimeout(1000);
-
-  await page
-    .getByRole("button", { name: "Receiving currency button." })
-    .click({ force: true });
-
-  await page.waitForTimeout(1000);
-
-  await page
-    .getByRole("option", { name: /Currency receiving option:\s*NGN in Nigeria/i })
-    .first()
-    .click({ timeout: 10000 });
+  await ngnOption.waitFor({ timeout: 15000 });
+  await ngnOption.scrollIntoViewIfNeeded().catch(() => {});
+  await ngnOption.click({ timeout: 15000, force: true });
 
   await page.waitForTimeout(5000);
 
@@ -380,10 +386,10 @@ async function handleTransferGo(page, source) {
   let rate = null;
 
   const patterns = [
-    /GBP\s*1\s*=\s*NGN\s*([0-9,]+(?:\.\d+)?)/i,
     /1\s*GBP\s*=\s*([0-9,]+(?:\.\d+)?)\s*NGN/i,
+    /GBP\s*1\s*=\s*NGN\s*([0-9,]+(?:\.\d+)?)/i,
     /GBP\s*=\s*([0-9,]+(?:\.\d+)?)\s*NGN/i,
-    /\b(1869\.44)\b/i,
+    /\b(1[0-9]{3}(?:\.\d{1,6})?)\b/,
   ];
 
   for (const regex of patterns) {
@@ -391,6 +397,7 @@ async function handleTransferGo(page, source) {
     if (!match) continue;
 
     const candidate = parseLocaleNumber(match[1] || match[0]);
+
     if (candidate && candidate >= 1000 && candidate <= 3000) {
       rate = Number(candidate.toFixed(6));
       break;
@@ -413,10 +420,9 @@ async function handleTransferGo(page, source) {
     fee: 0,
     delivery_speed: null,
     source_type: "browser_automation",
-    verification_status: "verified_from_quote_page",
-    source_url: source.url,
+    verification_status: "verified_from_transfergo_currency_converter",
+    source_url: "https://www.transfergo.com/gb/currency-converter",
     checked_at: new Date().toISOString(),
-    verified_method: "transfergo_uk_ng_direct_rate_page",
   };
 }
 
