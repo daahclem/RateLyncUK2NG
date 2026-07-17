@@ -45,8 +45,16 @@ async function postQuote(payload) {
   }
 }
 
-function saveDebugText() {
-  
+function saveDebugText(provider, text) {
+  const safe = provider
+    .replace(/\s+/g, "-")
+    .toLowerCase();
+
+  fs.writeFileSync(
+    `debug-${safe}.txt`,
+    String(text || ""),
+    "utf8"
+  );
 }
 
 async function saveScreenshot(page, provider) {
@@ -186,6 +194,35 @@ function buildPayloadFromText(source, bodyText) {
     source_url: source.url,
     checked_at: new Date().toISOString(),
   };
+}
+
+function extractGbpNgnRate(text) {
+  if (!text) return null;
+
+  const cleaned = String(text)
+    .replace(/,/g, "")
+    .replace(/\s+/g, " ");
+
+  const patterns = [
+    /Exchange\s*Rate\s*1\s*GBP\s*=\s*([0-9]+(?:\.[0-9]+)?)/i,
+    /Rate\s*1\s*GBP\s*[=≈]\s*([0-9]+(?:\.[0-9]+)?)\s*NGN/i,
+    /1\s*GBP\s*[=≈]\s*([0-9]+(?:\.[0-9]+)?)\s*NGN/i,
+    /GBP\s*[=≈]\s*([0-9]+(?:\.[0-9]+)?)\s*NGN/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = cleaned.match(pattern);
+
+    if (!match) continue;
+
+    const rate = parseLocaleNumber(match[1]);
+
+    if (rate && rate >= 1000 && rate <= 3000) {
+      return Number(rate.toFixed(6));
+    }
+  }
+
+  return null;
 }
 
 async function handleLemFi(page, source) {
@@ -432,47 +469,120 @@ async function handlePayAngel(page, source) {
     timeout: 60000,
   });
 
-  await page.waitForTimeout(4000);
+  await page.waitForTimeout(6000);
 
-  await page.getByRole("button", { name: /Close dialogue/i }).click({ timeout: 5000 }).catch(() => {});
+  await page
+    .getByRole("button", {
+      name: /Close dialogue/i,
+    })
+    .click({
+      timeout: 8000,
+      force: true,
+    })
+    .catch(() => {});
+
+  await page
+    .getByRole("button", {
+      name: /^Close$/i,
+    })
+    .click({
+      timeout: 4000,
+      force: true,
+    })
+    .catch(() => {});
+
   await page.keyboard.press("Escape").catch(() => {});
 
-  await page.getByRole("button", { name: "GBP" }).click({ timeout: 15000 });
-  await page.getByRole("listbox").getByText("GBP").click({ timeout: 10000 });
+  /*
+   * Remove the Elementor promotional popup if it remains.
+   */
+  await page
+    .locator(
+      '[id^="elementor-popup-modal-"]'
+    )
+    .evaluateAll((elements) => {
+      elements.forEach((element) =>
+        element.remove()
+      );
+
+      document.body.style.overflow = "auto";
+    })
+    .catch(() => {});
 
   await page.waitForTimeout(1000);
 
-  await page.getByRole("button", { name: "GHS" }).click({ timeout: 15000 });
-  await page.getByRole("option", { name: /NGN Nigeria/i }).click({ timeout: 10000 });
-
-  await page.waitForTimeout(4000);
-
-  const bodyText = await page.locator("body").innerText();
-  saveDebugText(source.provider, bodyText);
-
-  let rate = null;
-
-  const patterns = [
-    /1\s*GBP\s*=\s*([0-9.]+)\s*NGN/i,
-    /GBP\s*=\s*([0-9.]+)\s*NGN/i,
-    /([0-9.]+)\s*NGN/i,
-    /\b(18[0-9]{2}\.\d{1,5})\b/,
-  ];
-
-  for (const regex of patterns) {
-    const match = bodyText.match(regex);
-    if (!match) continue;
-
-    const candidate = parseLocaleNumber(match[1] || match[0]);
-    if (candidate && candidate >= 1000 && candidate <= 2500) {
-      rate = Number(candidate.toFixed(6));
-      break;
+  /*
+   * GBP is already the sending currency.
+   * Change only the receiving currency.
+   */
+  const destinationButton = page.getByRole(
+    "button",
+    {
+      name: /^GHS$/i,
     }
-  }
+  );
+
+  await destinationButton.waitFor({
+    state: "visible",
+    timeout: 15000,
+  });
+
+  await destinationButton.click({
+    timeout: 15000,
+    force: true,
+  });
+
+  await page.waitForTimeout(800);
+
+  await page
+    .getByRole("option", {
+      name: /NGN\s+Nigeria/i,
+    })
+    .click({
+      timeout: 15000,
+      force: true,
+    });
+
+  await page.waitForTimeout(5000);
+
+  const rateText = await page
+    .getByText(
+      /1\s*GBP\s*=\s*[0-9,.]+\s*NGN/i
+    )
+    .first()
+    .innerText()
+    .catch(() => "");
+
+  const bodyText = await page
+    .locator("body")
+    .innerText()
+    .catch(() => "");
+
+  const combinedText =
+    `${rateText}\n${bodyText}`;
+
+  saveDebugText(
+    source.provider,
+    combinedText
+  );
+
+  const rate = extractGbpNgnRate(
+    combinedText
+  );
 
   if (!rate) {
-    const file = await saveScreenshot(page, source.provider);
-    throw new Error(`Could not extract PayAngel rate. Screenshot: ${file}`);
+    const file = await saveScreenshot(
+      page,
+      source.provider
+    );
+
+    throw new Error(
+      `Could not extract PayAngel GBP/NGN rate. ` +
+      `Captured text: ${combinedText
+        .replace(/\s+/g, " ")
+        .slice(0, 500)}. ` +
+      `Screenshot: ${file}`
+    );
   }
 
   return {
@@ -482,63 +592,173 @@ async function handlePayAngel(page, source) {
     payout_method: source.payout_method,
     send_amount: 1,
     exchange_rate: rate,
-    amount_received: Number(rate.toFixed(6)),
+    amount_received: rate,
     fee: 0,
     delivery_speed: null,
     source_type: "browser_automation",
-    verification_status: "verified_from_quote_page",
+    verification_status:
+      "verified_from_quote_page",
     source_url: source.url,
     checked_at: new Date().toISOString(),
+    verified_method:
+      "payangel_live_gbp_ngn_rate",
   };
 }
 
 async function handleRemitChoice(page, source) {
-  await page.goto("https://www.remitchoice.com/fee-free-send-money-to/nigeria", {
-    waitUntil: "domcontentloaded",
-    timeout: 60000,
+  await page.goto(
+    "https://www.remitchoice.com/fee-free-send-money-to/nigeria",
+    {
+      waitUntil: "domcontentloaded",
+      timeout: 60000,
+    }
+  );
+
+  await page.waitForTimeout(6000);
+
+  await page
+    .getByRole("button", {
+      name: /Accept/i,
+    })
+    .click({
+      timeout: 4000,
+    })
+    .catch(() => {});
+
+  /*
+   * Sending country: United Kingdom.
+   */
+  const sendingCountry = page.getByRole(
+    "textbox",
+    {
+      name: "United Kingdom",
+      exact: true,
+    }
+  );
+
+  await sendingCountry.waitFor({
+    state: "visible",
+    timeout: 20000,
   });
+
+  await sendingCountry.click({
+    timeout: 15000,
+    force: true,
+  });
+
+  let searchBox = page
+    .getByRole("searchbox", {
+      name: "Search",
+    })
+    .last();
+
+  await searchBox.waitFor({
+    state: "visible",
+    timeout: 10000,
+  });
+
+  await searchBox.fill("un");
+
+  await page.waitForTimeout(800);
+
+  await page
+    .getByRole("option", {
+      name: "United Kingdom",
+      exact: true,
+    })
+    .click({
+      timeout: 15000,
+      force: true,
+    });
+
+  await page.waitForTimeout(1200);
+
+  /*
+   * Receiving country: Nigeria.
+   */
+  const receivingCountry = page.getByRole(
+    "textbox",
+    {
+      name: "Nigeria",
+      exact: true,
+    }
+  );
+
+  await receivingCountry.waitFor({
+    state: "visible",
+    timeout: 20000,
+  });
+
+  await receivingCountry.click({
+    timeout: 15000,
+    force: true,
+  });
+
+  searchBox = page
+    .getByRole("searchbox", {
+      name: "Search",
+    })
+    .last();
+
+  await searchBox.waitFor({
+    state: "visible",
+    timeout: 10000,
+  });
+
+  await searchBox.fill("niger");
+
+  await page.waitForTimeout(800);
+
+  await page
+    .getByRole("option", {
+      name: "Nigeria",
+      exact: true,
+    })
+    .click({
+      timeout: 15000,
+      force: true,
+    });
 
   await page.waitForTimeout(5000);
 
-  await page.getByRole("textbox", { name: /United Kingdom/i }).click({ timeout: 15000 });
-  await page.getByRole("searchbox", { name: "Search" }).fill("un");
-  await page.waitForTimeout(1000);
-  await page.getByRole("option", { name: "United Kingdom" }).click({ timeout: 15000 });
+  const rateText = await page
+    .getByText(
+      /Exchange\s*Rate\s*1\s*GBP\s*=\s*[0-9,.]+/i
+    )
+    .first()
+    .innerText()
+    .catch(() => "");
 
-  await page.waitForTimeout(1500);
+  const bodyText = await page
+    .locator("body")
+    .innerText()
+    .catch(() => "");
 
-  await page.getByRole("textbox", { name: /Nigeria/i }).click({ timeout: 15000 });
-  await page.waitForTimeout(1000);
-  await page.getByRole("option", { name: "Nigeria" }).click({ timeout: 15000 }).catch(() => {});
+  const combinedText =
+    `${rateText}\n${bodyText}`;
 
-  await page.waitForTimeout(4000);
+  saveDebugText(
+    source.provider,
+    combinedText
+  );
 
-  const bodyText = await page.locator("body").innerText();
-  saveDebugText(source.provider, bodyText);
-
-  let rate = null;
-
-  const patterns = [
-    /Exchange Rate\s*1\s*GBP\s*=\s*([0-9.]+)\s*NGN/i,
-    /1\s*GBP\s*=\s*([0-9.]+)\s*NGN/i,
-    /GBP\s*=\s*([0-9.]+)\s*NGN/i,
-    /\b(18[0-9]{2}(?:\.\d{1,5})?)\b/,
-  ];
-
-  for (const regex of patterns) {
-    const match = bodyText.match(regex);
-    if (!match) continue;
-
-    const candidate = parseLocaleNumber(match[1] || match[0]);
-    if (candidate && candidate >= 1000 && candidate <= 2500) {
-      rate = Number(candidate.toFixed(6));
-      break;
-    }
-  }
+  const rate = extractGbpNgnRate(
+    combinedText
+  );
 
   if (!rate) {
-    const file = await saveScreenshot(page, source.provider);
-    throw new Error(`Could not extract RemitChoice rate. Screenshot: ${file}`);
+    const file = await saveScreenshot(
+      page,
+      source.provider
+    );
+
+    throw new Error(
+      `Could not extract RemitChoice GBP/NGN rate. ` +
+      `Captured text: ${combinedText
+        .replace(/\s+/g, " ")
+        .slice(0, 500)}. ` +
+      `Screenshot: ${file}`
+    );
   }
 
   return {
@@ -548,13 +768,16 @@ async function handleRemitChoice(page, source) {
     payout_method: source.payout_method,
     send_amount: 1,
     exchange_rate: rate,
-    amount_received: Number(rate.toFixed(6)),
+    amount_received: rate,
     fee: 0,
     delivery_speed: null,
     source_type: "browser_automation",
-    verification_status: "verified_from_quote_page",
+    verification_status:
+      "verified_from_quote_page",
     source_url: source.url,
     checked_at: new Date().toISOString(),
+    verified_method:
+      "remitchoice_live_gbp_ngn_rate",
   };
 }
 
@@ -623,49 +846,122 @@ async function handleRizRemit(page, source) {
 }
 
 async function handleNala(page, source) {
-  await page.goto("https://www.nala.com/country/nigeria", {
+  await page.goto("https://www.nala.com/", {
     waitUntil: "domcontentloaded",
     timeout: 60000,
   });
 
-  await page.waitForTimeout(5000);
+  await page.waitForTimeout(6000);
 
-  await page.locator("button").filter({ hasText: "GBP" }).click({ timeout: 15000 });
-  await page.locator("#currency-listbox-dropdown-1").getByText("GBP").click({ timeout: 10000 });
+  await page
+    .getByRole("button", {
+      name: /Accept/i,
+    })
+    .click({
+      timeout: 4000,
+    })
+    .catch(() => {});
+
+  await page.keyboard.press("Escape").catch(() => {});
+
+  const currencyButtons = page.getByRole(
+    "button",
+    {
+      name: "Select currency",
+      exact: true,
+    }
+  );
+
+  /*
+   * Sending currency: GBP.
+   */
+  await currencyButtons.first().waitFor({
+    state: "visible",
+    timeout: 20000,
+  });
+
+  await currencyButtons.first().click({
+    timeout: 15000,
+    force: true,
+  });
+
+  await page.waitForTimeout(800);
+
+  await page
+    .getByRole("option", {
+      name: /British Pound\s+GBP\s+British/i,
+    })
+    .click({
+      timeout: 15000,
+      force: true,
+    });
 
   await page.waitForTimeout(1000);
 
-  await page.locator("button").filter({ hasText: "NGN" }).click({ timeout: 15000 });
-  await page.locator("#currency-listbox-dropdown-2").getByText("NGN").click({ timeout: 10000 });
+  /*
+   * Receiving currency: NGN.
+   */
+  await currencyButtons.nth(1).waitFor({
+    state: "visible",
+    timeout: 20000,
+  });
 
-  await page.waitForTimeout(4000);
+  await currencyButtons.nth(1).click({
+    timeout: 15000,
+    force: true,
+  });
 
-  const bodyText = await page.locator("body").innerText();
-  saveDebugText(source.provider, bodyText);
+  await page.waitForTimeout(800);
 
-  let rate = null;
+  await page
+    .getByRole("option", {
+      name: /Nigerian Naira\s+NGN\s+Nigerian/i,
+    })
+    .click({
+      timeout: 15000,
+      force: true,
+    });
 
-  const patterns = [
-    /GBP\s*[≈=]\s*([0-9.]+)\s*NGN/i,
-    /1\s*GBP\s*[≈=]\s*([0-9.]+)\s*NGN/i,
-    /GBP\s*=\s*([0-9.]+)\s*NGN/i,
-    /\b(18[0-9]{2}\.\d{1,5})\b/,
-  ];
+  await page.waitForTimeout(5000);
 
-  for (const regex of patterns) {
-    const match = bodyText.match(regex);
-    if (!match) continue;
+  const rateText = await page
+    .getByText(
+      /GBP\s*≈\s*[0-9,.]+\s*NGN/i
+    )
+    .first()
+    .innerText()
+    .catch(() => "");
 
-    const candidate = parseLocaleNumber(match[1] || match[0]);
-    if (candidate && candidate >= 1000 && candidate <= 2500) {
-      rate = Number(candidate.toFixed(6));
-      break;
-    }
-  }
+  const bodyText = await page
+    .locator("body")
+    .innerText()
+    .catch(() => "");
+
+  const combinedText =
+    `${rateText}\n${bodyText}`;
+
+  saveDebugText(
+    source.provider,
+    combinedText
+  );
+
+  const rate = extractGbpNgnRate(
+    combinedText
+  );
 
   if (!rate) {
-    const file = await saveScreenshot(page, source.provider);
-    throw new Error(`Could not extract Nala rate. Screenshot: ${file}`);
+    const file = await saveScreenshot(
+      page,
+      source.provider
+    );
+
+    throw new Error(
+      `Could not extract Nala GBP/NGN rate. ` +
+      `Captured text: ${combinedText
+        .replace(/\s+/g, " ")
+        .slice(0, 500)}. ` +
+      `Screenshot: ${file}`
+    );
   }
 
   return {
@@ -675,13 +971,16 @@ async function handleNala(page, source) {
     payout_method: source.payout_method,
     send_amount: 1,
     exchange_rate: rate,
-    amount_received: Number(rate.toFixed(6)),
+    amount_received: rate,
     fee: 0,
     delivery_speed: null,
     source_type: "browser_automation",
-    verification_status: "verified_from_quote_page",
+    verification_status:
+      "verified_from_quote_page",
     source_url: source.url,
     checked_at: new Date().toISOString(),
+    verified_method:
+      "nala_live_gbp_ngn_rate",
   };
 }
 
@@ -1256,165 +1555,188 @@ async function handlePadiePay(page, source) {
     timeout: 60000,
   });
 
-  await page.waitForTimeout(5000);
+  await page.waitForTimeout(7000);
 
-  await page.getByRole("button", { name: /Maybe, later/i }).click({ timeout: 5000 }).catch(() => {});
+  await page
+    .getByRole("button", {
+      name: "Maybe, later",
+      exact: true,
+    })
+    .click({
+      timeout: 10000,
+      force: true,
+    })
+    .catch(() => {});
 
-  // Sending currency = GBP
-  await page.getByRole("button", { name: /🇨🇦 CAD|CAD/i }).click().catch(() => {});
-  await page.getByText("British Pound Sterling").click().catch(() => {});
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(1000);
 
-  // Receiving currency = NGN
-  await page.getByRole("button", { name: /🇳🇬 NGN|NGN/i }).click().catch(() => {});
-  await page.getByText(/🇳🇬NGNNigerian Naira/i).click().catch(async () => {
-    await page.getByText(/Nigerian Naira/i).click().catch(() => {});
+  /*
+   * Select sending currency: GBP
+   */
+  const sendCurrencyButton = page.getByRole(
+    "button",
+    {
+      name: "🇺🇸 USD",
+      exact: true,
+    }
+  );
+
+  await sendCurrencyButton.waitFor({
+    state: "visible",
+    timeout: 20000,
   });
 
-  await page.waitForTimeout(2000);
+  await sendCurrencyButton.click({
+    timeout: 15000,
+    force: true,
+  });
 
-  const visibleInputs = page.locator("input:visible");
-  const inputCount = await visibleInputs.count();
+  await page.waitForTimeout(1000);
 
-  if (!inputCount) {
-    const file = await saveScreenshot(page, source.provider);
-    throw new Error(`PadiePay amount input not found. Screenshot: ${file}`);
-  }
+  const gbpOption = page.getByText(
+    "🇬🇧GBPBritish Pound Sterling",
+    {
+      exact: true,
+    }
+  );
 
-  let amountFilled = false;
-  for (let i = 0; i < inputCount; i++) {
-    const input = visibleInputs.nth(i);
-    try {
-      await input.click({ force: true });
-      await input.press("Control+A").catch(() => {});
-      await input.fill("1");
-      const val = await input.inputValue().catch(() => "");
-      if (String(val).trim() === "1") {
-        amountFilled = true;
-        break;
-      }
-    } catch (_) {}
-  }
+  await gbpOption.waitFor({
+    state: "visible",
+    timeout: 15000,
+  });
 
-  if (!amountFilled) {
-    const file = await saveScreenshot(page, source.provider);
-    throw new Error(`Could not fill PadiePay amount input. Screenshot: ${file}`);
-  }
+  await gbpOption.click({
+    timeout: 15000,
+    force: true,
+  });
 
-  await page.getByText(/GBP =|Transfer fee|Exchange|Free/i).click().catch(() => {});
-  await page.keyboard.press("Tab").catch(() => {});
-  await page.waitForTimeout(5000);
+  await page.waitForTimeout(1500);
 
-  let directRateText = "";
-  const rateLocator = page.getByText(/GBP\s*=\s*[\d.]+\s*NGN/i).first();
-  if (await rateLocator.count()) {
-    directRateText = (await rateLocator.innerText().catch(() => "")) || "";
-  }
+  /*
+   * Select receiving currency: NGN
+   */
+  const receiveCurrencyButton = page.getByRole(
+    "button",
+    {
+      name: "🇳🇬 NGN",
+      exact: true,
+    }
+  );
 
-  const bodyText = await page.locator("body").innerText();
-  const combinedText = `${directRateText}\n${bodyText}`;
-  saveDebugText(source.provider, combinedText);
+  await receiveCurrencyButton.waitFor({
+    state: "visible",
+    timeout: 20000,
+  });
+
+  await receiveCurrencyButton.click({
+    timeout: 15000,
+    force: true,
+  });
+
+  await page.waitForTimeout(1000);
+
+  const ngnOption = page.getByText(
+    "🇳🇬NGNNigerian Naira",
+    {
+      exact: true,
+    }
+  );
+
+  await ngnOption.waitFor({
+    state: "visible",
+    timeout: 15000,
+  });
+
+  await ngnOption.click({
+    timeout: 15000,
+    force: true,
+  });
+
+  await page.waitForTimeout(6000);
+
+  /*
+   * Read both visible rate formats.
+   */
+  const exchangeRateText = await page
+    .getByText(
+      /Exchange\s*rate\s*1\s*GBP\s*=\s*[0-9,.]+/i
+    )
+    .first()
+    .innerText()
+    .catch(() => "");
+
+  const directRateText = await page
+    .getByText(
+      /GBP\s*=\s*[0-9,.]+\s*NGN/i
+    )
+    .first()
+    .innerText()
+    .catch(() => "");
+
+  const bodyText = await page
+    .locator("body")
+    .innerText()
+    .catch(() => "");
+
+  const combinedText = [
+    exchangeRateText,
+    directRateText,
+    bodyText,
+  ].join("\n");
+
+  saveDebugText(
+    source.provider,
+    combinedText
+  );
+
+  const patterns = [
+    /Exchange\s*rate\s*1\s*GBP\s*=\s*([0-9,.]+)/i,
+    /GBP\s*=\s*([0-9,.]+)\s*NGN/i,
+    /1\s*GBP\s*=\s*([0-9,.]+)\s*NGN/i,
+  ];
 
   let rate = null;
 
-  const patterns = [
-    /GBP\s*=\s*([0-9.]+)\s*NGN/i,
-    /1\s*GBP\s*=\s*([0-9.]+)\s*NGN/i,
-    /Exchange[^0-9]*([0-9.]+)\s*NGN/i,
-  ];
+  for (const pattern of patterns) {
+    const match = combinedText.match(pattern);
 
-  for (const regex of patterns) {
-    const match = combinedText.match(regex);
     if (!match) continue;
-    const candidate = parseLocaleNumber(match[1]);
-    if (candidate && candidate > 0 && candidate < 10000) {
-      rate = Number(candidate.toFixed(6));
+
+    const candidate = parseLocaleNumber(
+      match[1]
+    );
+
+    if (
+      candidate &&
+      candidate >= 1000 &&
+      candidate <= 3000
+    ) {
+      rate = Number(
+        candidate.toFixed(6)
+      );
+
       break;
     }
   }
 
   if (!rate) {
-    const looseMatches = combinedText.match(/\b([2-9][0-9]{2,4}\.\d{2,5})\b/g) || [];
-    const candidates = looseMatches
-      .map((v) => parseFloat(v))
-      .filter((v) => !Number.isNaN(v) && v >= 100 && v <= 5000);
+    const file = await saveScreenshot(
+      page,
+      source.provider
+    );
 
-    if (candidates.length) {
-      rate = Number(candidates[0].toFixed(6));
-    }
+    throw new Error(
+      `Could not extract PadiePay GBP/NGN rate. ` +
+      `Captured text: ${combinedText
+        .replace(/\s+/g, " ")
+        .slice(0, 500)}. ` +
+      `Screenshot: ${file}`
+    );
   }
 
-  if (!rate) {
-    const file = await saveScreenshot(page, source.provider);
-    throw new Error(`Could not extract PadiePay rate. Screenshot: ${file}`);
-  }
-
-  return {
-    provider_name: source.provider,
-    origin_country: source.origin,
-    destination_country: source.destination,
-    payout_method: source.payout_method,
-    send_amount: 1,
-    exchange_rate: rate,
-    amount_received: Number(rate.toFixed(6)),
-    fee: 0,
-    delivery_speed: null,
-    source_type: "browser_automation",
-    verification_status: "verified_from_quote_page",
-    source_url: source.url,
-    checked_at: new Date().toISOString(),
-  };
-}
-
-async function handlePaysend(page, source) {
-  await page.goto("https://paysend.com/en-gb", {
-    waitUntil: "domcontentloaded",
-    timeout: 60000,
-  });
-
-  await page.waitForTimeout(5000);
-
-  await page.getByRole("button", { name: /Accept All Cookies/i }).click({ timeout: 6000 }).catch(() => {});
-
-  await page.locator("a").filter({ hasText: /^GBP$/ }).click({ timeout: 10000 });
-  await page.getByPlaceholder("Search for a country").fill("gbp");
-  await page.waitForTimeout(1000);
-  await page.getByText("United KingdomGBP").click({ timeout: 15000 });
-
-  await page.waitForTimeout(1500);
-
-  await page.locator("a").filter({ hasText: /^INR$/ }).click({ timeout: 10000 });
-  await page.getByPlaceholder("Search for a country").fill("niger");
-  await page.waitForTimeout(1000);
-
-  await page.getByText("NigeriaUSDNGN").click({ timeout: 15000 });
-  await page.getByText("NairaNGN").click({ timeout: 15000 });
-
-  await page.waitForTimeout(2500);
-
-  const bodyText = await page.locator("body").innerText();
-  saveDebugText(source.provider, bodyText);
-
-  let rate = null;
-  const patterns = [
-    /Today[’']s rate:\s*1\.00\s*GBP\s*=\s*([0-9,]+(?:\.\d+)?)/i,
-    /1\.00\s*GBP\s*=\s*([0-9,]+(?:\.\d+)?)\s*NGN/i,
-    /\b(1847(?:\.\d+)?)\b/i,
-  ];
-
-  for (const regex of patterns) {
-    const match = bodyText.match(regex);
-    if (!match) continue;
-    const candidate = parseLocaleNumber(match[1] || match[0]);
-    if (candidate && candidate >= 1000 && candidate <= 3000) {
-      rate = Number(candidate.toFixed(6));
-      break;
-    }
-  }
-
-  if (!rate) rate = 1847;
-
-  await page.locator("a").filter({ hasText: /^OK$/ }).click({ timeout: 3000 }).catch(() => {});
+  console.log(
+    `PadiePay extracted rate: ${rate}`
+  );
 
   return {
     provider_name: source.provider,
@@ -1427,12 +1749,14 @@ async function handlePaysend(page, source) {
     fee: 0,
     delivery_speed: null,
     source_type: "browser_automation",
-    verification_status: "verified_from_quote_page",
+    verification_status:
+      "verified_from_quote_page",
     source_url: source.url,
     checked_at: new Date().toISOString(),
+    verified_method:
+      "padiepay_live_gbp_ngn_rate",
   };
 }
-
 
 async function handlePesaCo(page, source) {
   await page.goto("https://www.pesa.co/", {
@@ -1520,98 +1844,6 @@ async function handlePesaCo(page, source) {
   };
 }
 
-async function handleSendBuddie(page, source) {
-  await page.goto("https://www.sendbuddie.com/", {
-    waitUntil: "domcontentloaded",
-    timeout: 60000,
-  });
-
-  await page.waitForTimeout(5000);
-
-  // Sending currency = GBP
-  await page.getByRole("combobox").filter({ hasText: "GBP" }).click({ timeout: 15000 });
-
-  let searchBox = page.getByPlaceholder("Search...").last();
-  await searchBox.waitFor({ timeout: 10000 });
-  await searchBox.fill("GBP");
-
-  await page.waitForTimeout(1000);
-
-  await page
-    .getByRole("option", { name: /^GBP GBP$/i })
-    .click({ timeout: 10000 })
-    .catch(async () => {
-      await page.getByText(/^GBP GBP$/i).click({ timeout: 10000 });
-    });
-
-  await page.waitForTimeout(1500);
-
-  // Receiving country/currency = Nigeria NGN
-  await page.getByRole("combobox").filter({ hasText: /NIGERIA|GHANA|NGN|GHS/i }).click({
-    timeout: 15000,
-  });
-
-  searchBox = page.getByPlaceholder("Search...").last();
-  await searchBox.waitFor({ timeout: 10000 });
-  await searchBox.fill("NG");
-
-  await page.waitForTimeout(1000);
-
-  await page
-    .getByRole("option", { name: /^NG NIGERIA$/i })
-    .click({ timeout: 10000 })
-    .catch(async () => {
-      await page.getByText(/^NG NIGERIA$/i).click({ timeout: 10000 });
-    });
-
-  await page.waitForTimeout(5000);
-
-  const bodyText = await page.locator("body").innerText();
-  saveDebugText(source.provider, bodyText);
-
-  let rate = null;
-
-  const patterns = [
-    /1\s*GBP\s*=\s*([0-9,]+(?:\.\d+)?)\s*NGN/i,
-    /GBP\s*=\s*([0-9,]+(?:\.\d+)?)\s*NGN/i,
-    /\b(1[0-9]{3}(?:\.\d{1,5})?)\b/,
-  ];
-
-  for (const regex of patterns) {
-    const match = bodyText.match(regex);
-    if (!match) continue;
-
-    const candidate = parseLocaleNumber(match[1] || match[0]);
-
-    if (candidate && candidate >= 1000 && candidate <= 3000) {
-      rate = Number(candidate.toFixed(6));
-      break;
-    }
-  }
-
-  if (!rate) {
-    const file = await saveScreenshot(page, source.provider);
-    throw new Error(`Could not extract SendBuddie rate. Screenshot: ${file}`);
-  }
-
-  return {
-    provider_name: source.provider,
-    origin_country: source.origin,
-    destination_country: source.destination,
-    payout_method: source.payout_method,
-    send_amount: 1,
-    exchange_rate: rate,
-    amount_received: Number(rate.toFixed(6)),
-    fee: 0,
-    delivery_speed: null,
-    source_type: "browser_automation",
-    verification_status: "verified_from_quote_page",
-    source_url: source.url,
-    checked_at: new Date().toISOString(),
-    verified_method: "sendbuddie_uk_ng_direct_rate",
-  };
-}
-
 
 async function handleTransferGalaxy(page, source) {
   await page.goto("https://transfergalaxy.com/", {
@@ -1691,64 +1923,6 @@ async function handleTransferGalaxy(page, source) {
 }
 
 
-async function handleVeloRemit(page, source) {
-  await page.goto("https://veloremit.com/en", {
-    waitUntil: "domcontentloaded",
-    timeout: 60000,
-  });
-
-  await page.waitForTimeout(5000);
-
-  await page.getByRole("button", { name: /Currency Converter/i }).click({ timeout: 15000 });
-  await page.waitForTimeout(2000);
-
-  await page.getByText("GBP", { exact: true }).click({ timeout: 15000 }).catch(() => {});
-  await page.getByText("United Kingdom - GBP").click({ timeout: 15000 }).catch(() => {});
-
-  await page.locator('[id*="target"]').getByRole("img", { name: "arrow" }).last().click({ timeout: 15000 }).catch(() => {});
-  await page.locator("div").filter({ hasText: /^Nigeria - NGN$/ }).first().click({ timeout: 15000 }).catch(() => {});
-
-  await page.waitForTimeout(4000);
-
-  const bodyText = await page.locator("body").innerText();
-  saveDebugText(source.provider, bodyText);
-
-  let rate = null;
-  const patterns = [
-    /Rate\s*1\s*GBP\s*≈\s*([0-9,]+(?:\.\d+)?)\s*NGN/i,
-    /GBP\s*≈\s*([0-9,]+(?:\.\d+)?)\s*NGN/i,
-    /\b(1871\.1)\b/i,
-  ];
-
-  for (const regex of patterns) {
-    const match = bodyText.match(regex);
-    if (!match) continue;
-    const candidate = parseLocaleNumber(match[1] || match[0]);
-    if (candidate && candidate >= 1000 && candidate <= 3000) {
-      rate = Number(candidate.toFixed(6));
-      break;
-    }
-  }
-
-  if (!rate) rate = 1871.1;
-
-  return {
-    provider_name: source.provider,
-    origin_country: source.origin,
-    destination_country: source.destination,
-    payout_method: source.payout_method,
-    send_amount: 1,
-    exchange_rate: rate,
-    amount_received: rate,
-    fee: 0,
-    delivery_speed: null,
-    source_type: "browser_automation",
-    verification_status: "verified_from_quote_page",
-    source_url: source.url,
-    checked_at: new Date().toISOString(),
-  };
-}
-
 
 async function runSource(browser, source) {
   const page = await browser.newPage({
@@ -1775,11 +1949,8 @@ else if (source.provider === "Jupay") payload = await handleJupay(page, source);
 else if (source.provider === "OaPay") payload = await handleOaPay(page, source);
 else if (source.provider === "Ohent Pay") payload = await handleOhentPay(page, source);
 else if (source.provider === "PadiePay") payload = await handlePadiePay(page, source);
-else if (source.provider === "Paysend") payload = await handlePaysend(page, source);
 else if (source.provider === "Pesa.co") payload = await handlePesaCo(page, source);
-else if (source.provider === "SendBuddie") payload = await handleSendBuddie(page, source);
 else if (source.provider === "TransferGalaxy") payload = await handleTransferGalaxy(page, source);
-else if (source.provider === "VeloRemit") payload = await handleVeloRemit(page, source);
     else throw new Error(`No handler configured for ${source.provider}`);
 
     await postQuote(payload);
