@@ -137,14 +137,7 @@
   "url": "https://www.padiepay.com/",
   "send_amount": 1
 },
-{
-  "provider": "Paysend",
-  "origin": "GB",
-  "destination": "NG",
-  "payout_method": "bank_transfer",
-  "url": "https://paysend.com/en-gb",
-  "send_amount": 1
-},
+
 {
   "provider": "Pesa.co",
   "origin": "GB",
@@ -154,14 +147,7 @@
   "send_amount": 1
 },
 
-{
-  "provider": "SendBuddie",
-  "origin": "GB",
-  "destination": "NG",
-  "payout_method": "bank_transfer",
-  "url": "https://www.sendbuddie.com/",
-  "send_amount": 1
-},
+
 {
   "provider": "TransferGalaxy",
   "origin": "GB",
@@ -169,13 +155,6 @@
   "payout_method": "bank_transfer",
   "url": "https://transfergalaxy.com/en/",
   "send_amount": 1
-},
-{
-  "provider": "VeloRemit",
-  "origin": "GB",
-  "destination": "NG",
-  "payout_method": "bank_transfer",
-  "url": "https://veloremit.com/en",
-  "send_amount": 1
 }
+
 ]
